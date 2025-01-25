@@ -42,7 +42,7 @@ with st.sidebar:
         w2_odds = st.number_input("W2 Odds", min_value=1.0, step=0.1)
         btts_yes_odds = st.number_input("BTTS Yes Odds", min_value=1.0, step=0.1)
         btts_no_odds = st.number_input("BTTS No Odds", min_value=1.0, step=0.1)
-        category = st.selectbox("Category", ["Favorite", "Moderate", "Underdog"])
+        category = st.selectbox("Category", ["Favorite", "Moderate", "Volatile"])
         
         if st.button("Add Fixture"):
             new_fixture = pd.DataFrame([{
@@ -84,12 +84,9 @@ def fixture_prediction_page():
     selected_fixtures = st.multiselect(
         "Select Fixtures", 
         st.session_state.fixtures["Fixture ID"].tolist(), 
-        default=st.session_state.fixtures["Fixture ID"].tolist()[:fixtures_per_slip]
+        default=st.session_state.fixtures["Fixture ID"].tolist()  # Allow selecting all fixtures
     )
-    
-    # Ensure only the selected number of fixtures are used
-    selected_fixtures = selected_fixtures[:fixtures_per_slip]
-    
+    st.header("Make Predictions")
     for fid in selected_fixtures:
         fixture = st.session_state.fixtures[st.session_state.fixtures["Fixture ID"] == fid].iloc[0]
         st.subheader(f"Fixture {fid}: {fixture['Home Team']} vs {fixture['Away Team']}")
@@ -104,14 +101,20 @@ def fixture_prediction_page():
             "Away Team": fixture["Away Team"],
             "Bet Type": bet,
             "Odds": fixture[f"{bet} Odds"],
-            "Risk Level": "High" if fixture["Category"] == "Underdog" else "Low"
+            "Risk Level": "High" if fixture["Category"] == "Volatile" else "Low"
         }
     
     if st.button("Generate Slips"):
         st.session_state.all_slips = []
+        all_fixtures = list(st.session_state.primary_predictions.values())
+        
         for slip_id in range(num_slips):
+            # Shuffle fixtures and select the first `fixtures_per_slip`
+            np.random.shuffle(all_fixtures)
+            selected_fixtures_for_slip = all_fixtures[:fixtures_per_slip]
+            
             # Create primary slip
-            primary_slip = pd.DataFrame(st.session_state.primary_predictions.values())
+            primary_slip = pd.DataFrame(selected_fixtures_for_slip)
             st.session_state.all_slips.append({"Type": f"Primary {slip_id+1}", "Slip": primary_slip})
             
             # Generate variants
@@ -142,7 +145,7 @@ def bet_slips_page():
         if "Primary" in slip["Type"]:
             # Display primary slip with green header
             st.markdown(
-                f"<h3 style='color: #2ecc71;'>{slip['Type']}</h3>", 
+                f"<h3 style='color: #000000;'>{slip['Type']}</h3>", 
                 unsafe_allow_html=True
             )
             col1, col2 = st.columns([4, 1])
