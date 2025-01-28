@@ -5,7 +5,9 @@ import matplotlib.pyplot as plt
 from openpyxl.styles import PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.workbook import Workbook
-from backend.database import init_db, save_fixtures_to_db, get_fixtures_from_db, save_slips_to_db, get_slips_from_db, update_slip_status
+from datetime import datetime
+from backend.database import init_db, save_fixtures_to_db, get_fixtures_from_db, save_slips_to_db, get_slips_from_db, update_slip_status, create_prediction_session, get_prediction_sessions, calculate_performance 
+
 
 
 # Initialize session state
@@ -139,132 +141,162 @@ def fixture_prediction_page():
     
     if st.button("Generate Slips"):
         st.session_state.all_slips = []
-        all_fixtures = list(st.session_state.primary_predictions.values())
+
+        # Only include selected fixtures in all_fixtures
+    all_fixtures = [
+        fixture for fid, fixture in st.session_state.primary_predictions.items()
+        if fid in selected_fixtures
+    ]
+    
+    for slip_id in range(num_slips):
+        # Shuffle fixtures and select the first `fixtures_per_slip`
+        np.random.shuffle(all_fixtures)
+        selected_fixtures_for_slip = all_fixtures[:fixtures_per_slip]
         
-        for slip_id in range(num_slips):
-            # Shuffle fixtures and select the first `fixtures_per_slip`
-            np.random.shuffle(all_fixtures)
-            selected_fixtures_for_slip = all_fixtures[:fixtures_per_slip]
-            
-            # Create primary slip
-            primary_slip = pd.DataFrame(selected_fixtures_for_slip)
-            st.session_state.all_slips.append({"Type": f"Primary {slip_id+1}", "Slip": primary_slip})
-            
-            # Generate variants
-            for i in range(num_variants):
-                variant = primary_slip.copy()
-                row_to_change = np.random.randint(0, len(variant))
-                fid = variant.iloc[row_to_change]["Fixture ID"]
-                current_bet = variant.iloc[row_to_change]["Bet Type"]
-                possible_bets = [bt for bt in bet_types if bt != current_bet]
-                new_bet = np.random.choice(possible_bets)
-                variant.at[row_to_change, "Bet Type"] = new_bet
-                variant.at[row_to_change, "Odds"] = st.session_state.fixtures[st.session_state.fixtures["Fixture ID"] == fid][f"{new_bet} Odds"].values[0]
-                st.session_state.all_slips.append({"Type": f"Variant {i+1} (Primary {slip_id+1})", "Slip": variant})
+        # Create primary slip
+        primary_slip = pd.DataFrame(selected_fixtures_for_slip)
+        st.session_state.all_slips.append({"Type": f"Primary {slip_id+1}", "Slip": primary_slip})
         
-        # Save slips to the database
-        save_slips_to_db(st.session_state.all_slips)
+        # Generate variants
+        for i in range(num_variants):
+            variant = primary_slip.copy()
+            row_to_change = np.random.randint(0, len(variant))
+            fid = variant.iloc[row_to_change]["Fixture ID"]
+            current_bet = variant.iloc[row_to_change]["Bet Type"]
+            possible_bets = [bt for bt in bet_types if bt != current_bet]
+            new_bet = np.random.choice(possible_bets)
+            variant.at[row_to_change, "Bet Type"] = new_bet
+            variant.at[row_to_change, "Odds"] = st.session_state.fixtures[st.session_state.fixtures["Fixture ID"] == fid][f"{new_bet} Odds"].values[0]
+            st.session_state.all_slips.append({"Type": f"Variant {i+1} (Primary {slip_id+1})", "Slip": variant})
+    
+    # Save slips to the database
+    if 'current_session' in st.session_state:
+        save_slips_to_db(st.session_state.all_slips, st.session_state.current_session)
         st.success("Slips generated and saved! Navigate to the Bet Slips page to validate results.")
-        if st.button("Go to Bet Slips"):
-            page = "Bet Slips"
+    else:
+        st.warning("Please create or select a prediction session first.")
 
 # Page 2: Bet Slips
 def bet_slips_page():
     st.header("Bet Slips")
-    if 'current_session' not in st.session_state:
-        st.warning("Please create or select a prediction session first")
-        return
     
+    if "current_session" not in st.session_state:
+        st.warning("Create or select a prediction session first.")
+        return
+
     slips = get_slips_from_db(st.session_state.current_session)
     
     if slips.empty:
-        st.warning("No slips generated yet. Go to the Fixture Prediction page to generate slips.")
+        st.warning("No slips found. Generate slips in the Fixture Prediction page.")
         return
     
-    for slip in slips.itertuples():
-        if "Primary" in slip.slip_type:
-            # Display primary slip with green header
+    # Sort slips by slip_name to ensure primary and variants are grouped together
+    slips = slips.sort_values(by="slip_name")
+
+    # Group slips by slip_name (e.g., "Primary 1", "Variant 1 (Primary 1)")
+    grouped = slips.groupby("slip_name")
+
+    for slip_name, group in grouped:
+        # Primary slip
+        if "Primary" in slip_name:
             st.markdown(
-                f"<h3 style='color: #2ecc71;'>{slip.slip_name} ({slip.slip_type})</h3>", 
-                unsafe_allow_html=True
+                f"<h3 style='color: #000000;'>{slip_name}</h3>",
+                unsafe_allow_html=True,
             )
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.dataframe(pd.DataFrame({
-                    'Fixture': [slip.fixture_id],
-                    'Bet Type': [slip.bet_type],
-                    'Odds': [slip.odds],
-                    'Risk Level': [slip.risk_level]
-                }))
-            with col2:
-                new_status = st.selectbox(
-                    "Status",
-                    ["Won", "Lost", "Pending"],
-                    index=["Won", "Lost", "Pending"].index(slip.status),
-                    key=f"status_{slip.slip_id}"
-                )
-                if new_status != slip.status:
-                    update_slip_status(slip.slip_id, new_status)
-                    st.experimental_rerun()
-        
-        elif "Variant" in slip.slip_type:
-            # Display variant with gray header in an expander
-            with st.expander(f"🔽 {slip.slip_name} ({slip.slip_type})"):
-                st.markdown(
-                    f"<h4 style='color: #95a5a6;'>{slip.slip_name} ({slip.slip_type})</h4>", 
-                    unsafe_allow_html=True
-                )
+            
+            # Display all fixtures in this slip
+            for _, row in group.iterrows():
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.dataframe(pd.DataFrame({
-                        'Fixture': [slip.fixture_id],
-                        'Bet Type': [slip.bet_type],
-                        'Odds': [slip.odds],
-                        'Risk Level': [slip.risk_level]
-                    }))
+                    st.dataframe(
+                        pd.DataFrame({
+                            "Fixture ID": [row.fixture_id],
+                            "Fixture": f"{row.home_team} vs {row.away_team}",  # Combine Home & Away Teams
+                            "Bet Type": [row.bet_type],
+                            "Odds": [row.odds],
+                            "Risk Level": [row.risk_level],
+                        })
+                    )
                 with col2:
                     new_status = st.selectbox(
                         "Status",
                         ["Won", "Lost", "Pending"],
-                        index=["Won", "Lost", "Pending"].index(slip.status),
-                        key=f"status_{slip.slip_id}"
+                        index=["Won", "Lost", "Pending"].index(row.status),
+                        key=f"status_{row.slip_id}",
                     )
-                    if new_status != slip.status:
-                        update_slip_status(slip.slip_id, new_status)
-                        st.experimental_rerun()
+                    if new_status != row.status:
+                        update_slip_status(row.slip_id, new_status)
+                        st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
+
+        # Variant slips (grouped under expanders)
+        elif "Variant" in slip_name:
+            with st.expander(f"🔽 {slip_name}"):
+                st.markdown(
+                    f"<h5 style='color: #567386;'>{slip_name}</h5>",
+                    unsafe_allow_html=True,
+                )
+                for _, row in group.iterrows():
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.dataframe(
+                            pd.DataFrame({
+                                "Fixture ID": [row.fixture_id],
+                                "Fixture": f"{row.home_team} vs {row.away_team}",  # Combine Home & Away Teams
+                                "Bet Type": [row.bet_type],
+                                "Odds": [row.odds],
+                                "Risk Level": [row.risk_level],
+                            })
+                        )
+                    with col2:
+                        new_status = st.selectbox(
+                            "Status",
+                            ["Won", "Lost", "Pending"],
+                            index=["Won", "Lost", "Pending"].index(row.status),
+                            key=f"status_{row.slip_id}",
+                        )
+                        if new_status != row.status:
+                            update_slip_status(row.slip_id, new_status)
+                            st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
 # Page 3: Bet Performance
 def bet_performance_page():
     st.header("Bet Performance")
-    if 'current_session' not in st.session_state:
-        st.warning("Please create or select a prediction session first")
-        return
     
+    if "current_session" not in st.session_state:
+        st.warning("Create or select a prediction session first.")
+        return
+
     performance_data = calculate_performance(st.session_state.current_session)
     
+    if performance_data.empty:
+        st.info("No data available for this session.")
+        return
+
     # Display Key Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Slips", len(performance_data))
     with col2:
-        win_rate = performance_data['status'].eq('Won').mean()
+        win_rate = performance_data["status"].eq("Won").mean()
         st.metric("Win Rate", f"{win_rate*100:.1f}%")
     with col3:
-        avg_odds = performance_data['total_odds'].mean()
+        avg_odds = performance_data["total_odds"].mean()
         st.metric("Average Odds", f"{avg_odds:.2f}")
-    
-    # Detailed Performance Table
-    st.subheader("Performance Details")
+
+    # Detailed Performance Table by Category
+    st.subheader("Performance by Category")
     st.dataframe(performance_data)
-    
-    # Visualization
-    st.subheader("Risk-Reward Analysis")
-    fig = px.scatter(performance_data, 
-                    x='total_odds', 
-                    y='risk_score',
-                    color='status',
-                    hover_data=['slip_name'])
-    st.plotly_chart(fig)
+
+    # # Visualization
+    # st.subheader("Risk-Reward Analysis")
+    # fig = px.scatter(
+    #     performance_data,
+    #     x="total_odds",
+    #     y="risk_score",
+    #     color="status",
+    #     hover_data=["slip_name"],
+    # )
+    # st.plotly_chart(fig)
 
 # Main App Logic
 if page == "Fixture Prediction":
