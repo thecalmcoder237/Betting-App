@@ -127,10 +127,9 @@ def calculate_performance(prediction_id):
 
 # Save fixtures to the database
 def save_fixtures_to_db(fixtures):
-    """
-    Save fixtures to the database.
-    """
+    
     conn = sqlite3.connect(os.path.join(os.path.dirname(__file__), "betting_app.db"))
+    print("Debug: Saving Fixtures -", fixtures)  # Debug: Print the fixtures being saved
     fixtures.to_sql("fixtures", conn, if_exists="replace", index=False)
     conn.close()
 
